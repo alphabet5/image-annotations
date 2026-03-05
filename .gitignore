@@ -1,0 +1,7 @@
+__pycache__/
+*.py[codz]
+*.egg-info/
+*.egg
+bdist/
+build/
+.venv/
