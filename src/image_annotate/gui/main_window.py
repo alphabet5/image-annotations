@@ -65,6 +65,8 @@ class MainWindow(QMainWindow):
                 config["show_coordinates"] = session_config["show_coordinates"]
             if "metadata_fields" in session_config:
                 config["metadata_fields"] = session_config["metadata_fields"]
+            if "image_adjustments" in session_config:
+                config["image_adjustments"] = session_config["image_adjustments"]
         except Exception as e:
             QMessageBox.warning(self, "Load error", f"Could not load annotations:\n{e}")
 

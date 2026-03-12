@@ -29,11 +29,18 @@ class Annotation(TypedDict):
     image_height: int
 
 
+class ImageAdjustments(TypedDict):
+    exposure:   float   # linear multiplier, 0.1–4.0, default 1.0
+    brightness: float   # linear multiplier, 0.1–3.0, default 1.0
+    gamma:      float   # power curve exponent, 0.1–5.0, default 1.0
+
+
 class AppConfig(TypedDict):
     images_dir: str
     annotations_file: str
     annotation_styles: dict     # dict[str, AnnotationStyle]
     magnifier: MagnifierConfig
+    image_adjustments: ImageAdjustments
     show_labels: bool
     show_coordinates: bool
     active_annotation_name: str
@@ -59,12 +66,17 @@ def default_magnifier_config() -> dict:
     }
 
 
+def default_image_adjustments() -> dict:
+    return {"exposure": 1.0, "brightness": 1.0, "gamma": 1.0}
+
+
 def default_app_config(images_dir: str = ".", annotations_file: str = "annotations.tsv") -> dict:
     return {
         "images_dir": images_dir,
         "annotations_file": annotations_file,
         "annotation_styles": {k: dict(v) for k, v in DEFAULT_STYLES.items()},
         "magnifier": default_magnifier_config(),
+        "image_adjustments": default_image_adjustments(),
         "show_labels": True,
         "show_coordinates": False,
         "active_annotation_name": "Point",

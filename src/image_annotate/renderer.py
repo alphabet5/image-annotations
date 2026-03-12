@@ -25,6 +25,9 @@ def render_annotations_onto_image(
     """
     styles = annotation_styles or {}
 
+    if output_path.suffix.lower() in {".heic", ".heif"}:
+        output_path = output_path.with_suffix(".png")
+
     with Image.open(image_path).convert("RGBA") as img:
         draw = ImageDraw.Draw(img)
 

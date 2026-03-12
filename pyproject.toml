@@ -12,6 +12,8 @@ license = { text = "MIT" }
 dependencies = [
     "PySide6>=6.6",
     "Pillow>=10.4",
+    "pillow-heif>=0.13",
+    "rawpy>=0.18",
     "click>=8.1",
     "Jinja2>=3.1",
 ]

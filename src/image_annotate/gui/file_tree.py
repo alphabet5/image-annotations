@@ -7,13 +7,13 @@ from PySide6.QtWidgets import QFileSystemModel, QTreeView, QVBoxLayout, QWidget
 class FileTreeWidget(QWidget):
     image_selected = Signal(Path)
 
-    SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".gif", ".webp"}
+    SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".gif", ".webp", ".heic", ".heif", ".rw2"}
 
     def __init__(self, root: Path, parent=None):
         super().__init__(parent)
         self._model = QFileSystemModel()
         self._model.setNameFilters(
-            ["*.png", "*.jpg", "*.jpeg", "*.tiff", "*.tif", "*.bmp", "*.gif", "*.webp"]
+            ["*.png", "*.jpg", "*.jpeg", "*.tiff", "*.tif", "*.bmp", "*.gif", "*.webp", "*.heic", "*.heif", "*.rw2"]
         )
         self._model.setNameFilterDisables(False)
         self._model.setRootPath(str(root))

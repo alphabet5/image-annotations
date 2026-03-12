@@ -125,13 +125,18 @@ def generate_images(annotations_path, images_dir, verbose, filename_template):
                 imageY=ih,
             )
             out_path = img_path.parent / out_name
+            actual_out_path = (
+                out_path.with_suffix(".png")
+                if out_path.suffix.lower() in {".heic", ".heif"}
+                else out_path
+            )
             render_annotations_onto_image(
                 img_path, anns, out_path,
                 annotation_styles=annotation_styles,
                 show_labels=show_labels,
                 show_coordinates=show_coordinates,
             )
-            click.echo(f"Saved: {out_path}")
+            click.echo(f"Saved: {actual_out_path}")
         except Exception as e:
             click.echo(f"ERROR processing {img_path}: {e}", err=True)
             errors += 1

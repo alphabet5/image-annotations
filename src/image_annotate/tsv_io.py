@@ -86,6 +86,18 @@ def load_annotations(tsv_path: Path) -> tuple[list[dict], dict]:
             metadata_fields = [f.strip() for f in parts[1:] if f.strip()]
             session_config["metadata_fields"] = metadata_fields
 
+        elif key == "image-adjustments" and len(parts) >= 2:
+            adj: dict = {}
+            for token in parts[1:]:
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    try:
+                        adj[k.strip()] = float(v)
+                    except ValueError:
+                        pass
+            if adj:
+                session_config["image_adjustments"] = adj
+
     if annotation_styles:
         session_config["annotation_styles"] = annotation_styles
 
@@ -148,6 +160,17 @@ def save_annotations(
         show_labels = cfg.get("show_labels", True)
         show_coordinates = cfg.get("show_coordinates", False)
         fh.write(f"# display\tshow_labels={int(show_labels)}\tshow_coordinates={int(show_coordinates)}\n")
+
+        adj = cfg.get("image_adjustments", {})
+        exposure   = adj.get("exposure",   1.0)
+        brightness = adj.get("brightness", 1.0)
+        gamma      = adj.get("gamma",      1.0)
+        fh.write(
+            f"# image-adjustments\t"
+            f"exposure={exposure:.4f}\t"
+            f"brightness={brightness:.4f}\t"
+            f"gamma={gamma:.4f}\n"
+        )
 
         if metadata_fields:
             fh.write("# metadata-fields\t" + "\t".join(metadata_fields) + "\n")

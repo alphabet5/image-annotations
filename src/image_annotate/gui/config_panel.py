@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
@@ -52,6 +53,7 @@ class ConfigPanel(QWidget):
 
         layout.addWidget(self._build_annotation_names_group(config))
         layout.addWidget(self._build_magnifier_group(config))
+        layout.addWidget(self._build_adjustments_group(config))
         layout.addWidget(self._build_metadata_group(config))
         layout.addWidget(self._build_output_group(config))
         layout.addWidget(self._build_display_group(config))
@@ -146,6 +148,58 @@ class ConfigPanel(QWidget):
 
         return group
 
+    def _build_adjustments_group(self, config: dict) -> QGroupBox:
+        group = QGroupBox("Image Adjustments")
+        layout = QVBoxLayout(group)
+        adj = config.get("image_adjustments", {})
+
+        exp_row = QHBoxLayout()
+        exp_row.addWidget(QLabel("Exposure (×):"))
+        self._adj_exposure = QDoubleSpinBox()
+        self._adj_exposure.setRange(0.1, 4.0)
+        self._adj_exposure.setSingleStep(0.1)
+        self._adj_exposure.setDecimals(2)
+        self._adj_exposure.setValue(adj.get("exposure", 1.0))
+        self._adj_exposure.valueChanged.connect(self._on_any_change)
+        exp_row.addWidget(self._adj_exposure)
+        layout.addLayout(exp_row)
+
+        bri_row = QHBoxLayout()
+        bri_row.addWidget(QLabel("Brightness (×):"))
+        self._adj_brightness = QDoubleSpinBox()
+        self._adj_brightness.setRange(0.1, 3.0)
+        self._adj_brightness.setSingleStep(0.05)
+        self._adj_brightness.setDecimals(2)
+        self._adj_brightness.setValue(adj.get("brightness", 1.0))
+        self._adj_brightness.valueChanged.connect(self._on_any_change)
+        bri_row.addWidget(self._adj_brightness)
+        layout.addLayout(bri_row)
+
+        gam_row = QHBoxLayout()
+        gam_row.addWidget(QLabel("Gamma:"))
+        self._adj_gamma = QDoubleSpinBox()
+        self._adj_gamma.setRange(0.1, 5.0)
+        self._adj_gamma.setSingleStep(0.1)
+        self._adj_gamma.setDecimals(2)
+        self._adj_gamma.setValue(adj.get("gamma", 1.0))
+        self._adj_gamma.valueChanged.connect(self._on_any_change)
+        gam_row.addWidget(self._adj_gamma)
+        layout.addLayout(gam_row)
+
+        reset_btn = QPushButton("Reset")
+        reset_btn.clicked.connect(self._reset_adjustments)
+        layout.addWidget(reset_btn)
+
+        return group
+
+    def _reset_adjustments(self):
+        self._suppress_signals = True
+        self._adj_exposure.setValue(1.0)
+        self._adj_brightness.setValue(1.0)
+        self._adj_gamma.setValue(1.0)
+        self._suppress_signals = False
+        self._on_any_change()
+
     def _build_metadata_group(self, config: dict) -> QGroupBox:
         group = QGroupBox("Metadata fields (saved to TSV)")
         layout = QVBoxLayout(group)
@@ -210,6 +264,11 @@ class ConfigPanel(QWidget):
                 "offset_x": self._mag_offset_x.value(),
                 "offset_y": self._mag_offset_y.value(),
                 "upscale": self._mag_upscale.isChecked(),
+            },
+            "image_adjustments": {
+                "exposure":   self._adj_exposure.value(),
+                "brightness": self._adj_brightness.value(),
+                "gamma":      self._adj_gamma.value(),
             },
             "show_labels": self._show_labels.isChecked(),
             "show_coordinates": self._show_coords.isChecked(),

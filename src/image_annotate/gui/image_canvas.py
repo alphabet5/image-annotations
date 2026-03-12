@@ -1,6 +1,8 @@
+import io
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPointF, Signal
+from PIL import Image as PILImage, ImageEnhance
+from PySide6.QtCore import Qt, QPointF, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QPainter, QPen, QPixmap, QTransform,
 )
@@ -8,6 +10,80 @@ from PySide6.QtWidgets import QGraphicsScene, QGraphicsView, QGraphicsPixmapItem
 
 from ..models import make_annotation
 from ..utils.coord_utils import ScaleInfo, scene_to_image
+
+# Formats Qt can decode natively — no PIL required at default adjustments
+_QT_NATIVE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+# Formats that always require PIL to open
+_PIL_REQUIRED_EXTENSIONS = {".heic", ".heif", ".tiff", ".tif", ".rw2"}
+# RAW formats decoded via rawpy
+_RAW_EXTENSIONS = {".rw2"}
+
+
+def _adjustments_are_default(config: dict) -> bool:
+    adj = config.get("image_adjustments", {})
+    return (
+        abs(adj.get("exposure",   1.0) - 1.0) <= 1e-4
+        and abs(adj.get("brightness", 1.0) - 1.0) <= 1e-4
+        and abs(adj.get("gamma",      1.0) - 1.0) <= 1e-4
+    )
+
+
+def _load_pil_image(path: Path) -> PILImage.Image:
+    """
+    Decode any supported format into an RGB PIL Image.
+    - RW2: decoded via rawpy (lazy import)
+    - Everything else (HEIC via pillow-heif, TIFF, JPEG, PNG, …): PIL
+    """
+    if path.suffix.lower() in _RAW_EXTENSIONS:
+        import rawpy  # lazy import — only paid when opening a RAW file
+        with rawpy.imread(str(path)) as raw:
+            rgb_array = raw.postprocess(use_camera_wb=True, output_bps=8)
+        return PILImage.fromarray(rgb_array)
+
+    with PILImage.open(path) as img:
+        return img.convert("RGB")  # forces pixel data into memory before context exits
+
+
+def _pil_to_pixmap(pil_image: PILImage.Image) -> QPixmap:
+    """
+    Convert a PIL Image to QPixmap via BMP as the intermediate format.
+    BMP is uncompressed so encode/decode is near-instant (memory bandwidth only),
+    unlike PNG which requires full compression and can take seconds on large images.
+    """
+    buf = io.BytesIO()
+    pil_image.save(buf, format="BMP")
+    pixmap = QPixmap()
+    pixmap.loadFromData(buf.getvalue())
+    return pixmap
+
+
+def _apply_adjustments(pil_image: PILImage.Image, config: dict) -> QPixmap:
+    """
+    Apply exposure / brightness / gamma from config["image_adjustments"]
+    and return a QPixmap ready for display.
+
+    Pipeline (PIL only, no numpy):
+      1. Combined linear factor (exposure × brightness) via ImageEnhance.Brightness
+      2. Gamma correction via a 256-entry per-channel LUT
+    """
+    adj = config.get("image_adjustments", {})
+    exposure   = float(adj.get("exposure",   1.0))
+    brightness = float(adj.get("brightness", 1.0))
+    gamma      = float(adj.get("gamma",      1.0))
+
+    img = pil_image  # already RGB
+
+    linear = exposure * brightness
+    if abs(linear - 1.0) > 1e-4:
+        img = ImageEnhance.Brightness(img).enhance(linear)
+
+    if abs(gamma - 1.0) > 1e-4:
+        inv_gamma = 1.0 / max(gamma, 0.01)
+        lut = [min(255, max(0, round((i / 255.0) ** inv_gamma * 255.0)))
+               for i in range(256)]
+        img = img.point(lut * 3)  # 3 identical channel LUTs for RGB
+
+    return _pil_to_pixmap(img)
 
 
 class AnnotationCanvas(QGraphicsView):
@@ -31,6 +107,9 @@ class AnnotationCanvas(QGraphicsView):
         self.setCursor(Qt.CursorShape.BlankCursor)
 
         self._pixmap_item: QGraphicsPixmapItem | None = None
+        # Stores the raw decoded PIL image for re-applying adjustments.
+        # None when the image was loaded via the Qt-native fast path.
+        self._pil_image: PILImage.Image | None = None
         self._scale_info: ScaleInfo = ScaleInfo()
         self._config: dict = {}
         self._annotations: list[dict] = []
@@ -40,10 +119,28 @@ class AnnotationCanvas(QGraphicsView):
         self._current_image_path: Path | None = None
         self._original_size: tuple[int, int] = (0, 0)
 
+        # Debounce timer: coalesces rapid slider changes into a single redraw
+        self._adjust_timer = QTimer(self)
+        self._adjust_timer.setSingleShot(True)
+        self._adjust_timer.setInterval(80)  # ms — tune to taste
+        self._adjust_timer.timeout.connect(self._reload_pixmap)
+
     def load_image(self, path: Path) -> None:
         """Load a new image WITHOUT resetting the current zoom level."""
         self._current_image_path = path
-        pixmap = QPixmap(str(path))
+        suffix = path.suffix.lower()
+
+        if suffix in _QT_NATIVE_EXTENSIONS and _adjustments_are_default(self._config):
+            # Fast path: Qt decodes natively, no PIL overhead
+            self._pil_image = None
+            pixmap = QPixmap(str(path))
+        else:
+            # PIL path: special format (HEIC/TIFF/RW2) or active adjustments
+            self._pil_image = _load_pil_image(path)
+            pixmap = _apply_adjustments(self._pil_image, self._config)
+
+        if pixmap.isNull():
+            raise ValueError(f"Could not load image: {path}")
         self._original_size = (pixmap.width(), pixmap.height())
 
         self._scene.clear()
@@ -65,7 +162,12 @@ class AnnotationCanvas(QGraphicsView):
         self._rebuild_annotation_graphics()
 
     def set_config(self, config: dict) -> None:
+        old_adj = self._config.get("image_adjustments", {})
         self._config = config
+        new_adj = config.get("image_adjustments", {})
+        if new_adj != old_adj:
+            # Debounce: restart the timer so rapid slider moves batch into one redraw
+            self._adjust_timer.start()
         self._rebuild_annotation_graphics()
         if self._magnifier:
             self._magnifier.set_config(config)
@@ -148,6 +250,42 @@ class AnnotationCanvas(QGraphicsView):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _reload_pixmap(self) -> None:
+        """
+        Re-apply current adjustments to the displayed image and update the scene.
+        Called after the debounce timer fires following an adjustment change.
+
+        Two paths:
+        - Adjustments back to default + Qt-native format → fast Qt reload, drop PIL image
+        - Any other case → use/lazy-load PIL image, apply adjustments via BMP intermediate
+        """
+        if self._current_image_path is None or self._pixmap_item is None:
+            return
+
+        suffix = self._current_image_path.suffix.lower()
+
+        if _adjustments_are_default(self._config) and suffix in _QT_NATIVE_EXTENSIONS:
+            # Adjustments reset to neutral: go back to the Qt fast path
+            self._pil_image = None
+            pixmap = QPixmap(str(self._current_image_path))
+        else:
+            # Need adjusted display: lazy-load PIL image if not already cached
+            if self._pil_image is None:
+                self._pil_image = _load_pil_image(self._current_image_path)
+            pixmap = _apply_adjustments(self._pil_image, self._config)
+
+        if pixmap.isNull():
+            return
+
+        self._pixmap_item.setPixmap(pixmap)
+        self._original_size = (pixmap.width(), pixmap.height())
+        self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        self._scale_info = ScaleInfo(
+            scale_factor=self.transform().m11(),
+            original_width=pixmap.width(),
+            original_height=pixmap.height(),
+        )
+
     def _init_crosshair(self):
         pen = QPen(QColor("#00FF00"), 1, Qt.PenStyle.DashLine)
         sr = self._scene.sceneRect()
@@ -196,7 +334,6 @@ class AnnotationCanvas(QGraphicsView):
         self.annotation_added.emit(ann)
 
     def _handle_right_click(self, scene_pos: QPointF):
-        # Use the active annotation's size for hit-test tolerance, fallback to 12
         active_name = self._config.get("active_annotation_name", "Point")
         styles = self._config.get("annotation_styles", {})
         style = styles.get(active_name, {})
@@ -230,7 +367,6 @@ class AnnotationCanvas(QGraphicsView):
         name = ann["annotation_name"]
         style = styles.get(name, {})
 
-        # Resolve style fields with fallback to annotation's stored color
         color = style.get("color") or ann.get("annotation_color", "#FF0000")
         shape = style.get("shape", "X")
         size = style.get("size", 12)
