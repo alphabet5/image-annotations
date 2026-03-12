@@ -4,7 +4,7 @@ from pathlib import Path
 from PIL import Image as PILImage, ImageEnhance
 from PySide6.QtCore import Qt, QPointF, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QPainter, QPen, QPixmap, QTransform,
+    QColor, QCursor, QPainter, QPen, QPixmap, QTransform,
 )
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView, QGraphicsPixmapItem
 
@@ -160,6 +160,9 @@ class AnnotationCanvas(QGraphicsView):
         )
         self._init_crosshair()
         self._rebuild_annotation_graphics()
+        # If the mouse is already inside the canvas, update crosshair and magnifier
+        # immediately — otherwise they stay hidden until the next mouse-move event.
+        self._sync_cursor_overlays()
 
     def set_config(self, config: dict) -> None:
         old_adj = self._config.get("image_adjustments", {})
@@ -211,9 +214,11 @@ class AnnotationCanvas(QGraphicsView):
                 original_height=self._original_size[1],
             )
             self.zoom_changed.emit(self.transform().m11())
-            event.accept()
         else:
             super().wheelEvent(event)
+        # Always consume the event — prevent it propagating to parent widgets
+        # (e.g. the config panel's QScrollArea) when the canvas has nothing to scroll.
+        event.accept()
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
@@ -285,6 +290,26 @@ class AnnotationCanvas(QGraphicsView):
             original_width=pixmap.width(),
             original_height=pixmap.height(),
         )
+
+    def _sync_cursor_overlays(self) -> None:
+        """
+        If the mouse is currently inside the canvas viewport, immediately update
+        the crosshair and magnifier to their correct positions.  Called after
+        load_image so the overlays appear without requiring a mouse move.
+        """
+        viewport = self.viewport()
+        local = viewport.mapFromGlobal(QCursor.pos())
+        if not viewport.rect().contains(local):
+            return
+        scene_pos = self.mapToScene(local)
+        self._update_crosshair(scene_pos)
+        if self._config.get("magnifier", {}).get("enabled") and self._magnifier:
+            self._magnifier.update_from_cursor(
+                cursor_view_pos=QPointF(local),
+                scene_pos=scene_pos,
+                pixmap_item=self._pixmap_item,
+                scale_info=self._scale_info,
+            )
 
     def _init_crosshair(self):
         pen = QPen(QColor("#00FF00"), 1, Qt.PenStyle.DashLine)
