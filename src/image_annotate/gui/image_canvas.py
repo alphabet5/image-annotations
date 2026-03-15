@@ -1,77 +1,53 @@
-import io
 from pathlib import Path
 
 from PIL import Image as PILImage, ImageEnhance
-from PySide6.QtCore import Qt, QPointF, QTimer, Signal
+from PySide6.QtCore import Qt, QObject, QPointF, QRunnable, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import (
-    QColor, QCursor, QPainter, QPen, QPixmap, QTransform,
+    QColor, QCursor, QImage, QPainter, QPen, QPixmap, QTransform,
 )
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView, QGraphicsPixmapItem
 
 from ..models import make_annotation
 from ..utils.coord_utils import ScaleInfo, scene_to_image
 
-# Formats Qt can decode natively — no PIL required at default adjustments
-_QT_NATIVE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
-# Formats that always require PIL to open
-_PIL_REQUIRED_EXTENSIONS = {".heic", ".heif", ".tiff", ".tif", ".rw2"}
 # RAW formats decoded via rawpy
 _RAW_EXTENSIONS = {".rw2"}
 
 
-def _adjustments_are_default(config: dict) -> bool:
-    adj = config.get("image_adjustments", {})
-    return (
-        abs(adj.get("exposure",   1.0) - 1.0) <= 1e-4
-        and abs(adj.get("brightness", 1.0) - 1.0) <= 1e-4
-        and abs(adj.get("gamma",      1.0) - 1.0) <= 1e-4
-    )
-
 
 def _load_pil_image(path: Path) -> PILImage.Image:
     """
-    Decode any supported format into an RGB PIL Image.
-    - RW2: decoded via rawpy (lazy import)
+    Decode any supported format into an RGB PIL Image.  Thread-safe.
+    - RW2: decoded via rawpy with LINEAR demosaicing (~4× faster than AHD, adequate for annotation)
     - Everything else (HEIC via pillow-heif, TIFF, JPEG, PNG, …): PIL
     """
     if path.suffix.lower() in _RAW_EXTENSIONS:
         import rawpy  # lazy import — only paid when opening a RAW file
         with rawpy.imread(str(path)) as raw:
-            rgb_array = raw.postprocess(use_camera_wb=True, output_bps=8)
+            rgb_array = raw.postprocess(
+                use_camera_wb=True,
+                output_bps=8,
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
+                no_auto_bright=True,
+                median_filter_passes=0,
+            )
         return PILImage.fromarray(rgb_array)
 
     with PILImage.open(path) as img:
         return img.convert("RGB")  # forces pixel data into memory before context exits
 
 
-def _pil_to_pixmap(pil_image: PILImage.Image) -> QPixmap:
+def _apply_adjustments_to_pil(pil_image: PILImage.Image, config: dict) -> PILImage.Image:
     """
-    Convert a PIL Image to QPixmap via BMP as the intermediate format.
-    BMP is uncompressed so encode/decode is near-instant (memory bandwidth only),
-    unlike PNG which requires full compression and can take seconds on large images.
-    """
-    buf = io.BytesIO()
-    pil_image.save(buf, format="BMP")
-    pixmap = QPixmap()
-    pixmap.loadFromData(buf.getvalue())
-    return pixmap
-
-
-def _apply_adjustments(pil_image: PILImage.Image, config: dict) -> QPixmap:
-    """
-    Apply exposure / brightness / gamma from config["image_adjustments"]
-    and return a QPixmap ready for display.
-
-    Pipeline (PIL only, no numpy):
-      1. Combined linear factor (exposure × brightness) via ImageEnhance.Brightness
-      2. Gamma correction via a 256-entry per-channel LUT
+    Apply exposure/brightness/gamma adjustments.  Returns a PIL Image.
+    Thread-safe — does not create any Qt objects.
     """
     adj = config.get("image_adjustments", {})
     exposure   = float(adj.get("exposure",   1.0))
     brightness = float(adj.get("brightness", 1.0))
     gamma      = float(adj.get("gamma",      1.0))
 
-    img = pil_image  # already RGB
+    img = pil_image
 
     linear = exposure * brightness
     if abs(linear - 1.0) > 1e-4:
@@ -83,14 +59,74 @@ def _apply_adjustments(pil_image: PILImage.Image, config: dict) -> QPixmap:
                for i in range(256)]
         img = img.point(lut * 3)  # 3 identical channel LUTs for RGB
 
-    return _pil_to_pixmap(img)
+    return img
 
+
+def _pil_to_pixmap(pil_image: PILImage.Image) -> QPixmap:
+    """
+    Convert a PIL Image to QPixmap via QImage (no intermediate encode/decode).
+    Must be called on the main thread.
+    """
+    w, h = pil_image.size
+    raw = pil_image.tobytes("raw", "RGB")
+    qimage = QImage(raw, w, h, w * 3, QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(qimage)
+
+
+def _apply_adjustments(pil_image: PILImage.Image, config: dict) -> QPixmap:
+    """Apply adjustments and return a ready-to-display QPixmap.  Main thread only."""
+    return _pil_to_pixmap(_apply_adjustments_to_pil(pil_image, config))
+
+
+# ---------------------------------------------------------------------------
+# Background image loader
+# ---------------------------------------------------------------------------
+
+class _LoaderSignals(QObject):
+    """Carries results from a background _ImageLoader back to the main thread."""
+    # raw_bytes: raw RGB bytes (w*h*3), ready to wrap in QImage on main thread
+    # width, height: image dimensions
+    # pil_image: decoded PIL image (retained for re-adjustment without re-decode)
+    # seq: load sequence number — stale loads are discarded
+    finished = Signal(bytes, int, int, object, int)
+    failed   = Signal(str, int)
+
+
+class _ImageLoader(QRunnable):
+    """
+    Loads and adjusts an image entirely off the main thread.
+    All PIL / rawpy work happens here; QPixmap creation stays in the main thread.
+    """
+    def __init__(self, path: Path, config: dict, seq: int, signals: _LoaderSignals):
+        super().__init__()
+        self.setAutoDelete(True)
+        self._path    = path
+        self._config  = config
+        self._seq     = seq
+        self._signals = signals
+
+    def run(self) -> None:
+        try:
+            pil_img = _load_pil_image(self._path)
+            adj_pil = _apply_adjustments_to_pil(pil_img, self._config)
+            w, h = adj_pil.size
+            raw_bytes = adj_pil.tobytes("raw", "RGB")
+            self._signals.finished.emit(raw_bytes, w, h, pil_img, self._seq)
+        except Exception as exc:
+            self._signals.failed.emit(str(exc), self._seq)
+
+
+# ---------------------------------------------------------------------------
+# Canvas
+# ---------------------------------------------------------------------------
 
 class AnnotationCanvas(QGraphicsView):
-    annotation_added = Signal(dict)
+    annotation_added  = Signal(dict)
     annotation_removed = Signal(str)
-    zoom_changed = Signal(float)
-    cursor_moved = Signal(float, float)
+    zoom_changed      = Signal(float)
+    cursor_moved      = Signal(float, float)
+    image_loaded      = Signal(Path)   # fired after an async load completes
+    load_failed       = Signal(str)    # fired when a load fails
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -107,40 +143,59 @@ class AnnotationCanvas(QGraphicsView):
         self.setCursor(Qt.CursorShape.BlankCursor)
 
         self._pixmap_item: QGraphicsPixmapItem | None = None
-        # Stores the raw decoded PIL image for re-applying adjustments.
-        # None when the image was loaded via the Qt-native fast path.
-        self._pil_image: PILImage.Image | None = None
-        self._scale_info: ScaleInfo = ScaleInfo()
-        self._config: dict = {}
+        self._pil_image:   PILImage.Image | None = None
+        self._scale_info:  ScaleInfo = ScaleInfo()
+        self._config:      dict = {}
         self._annotations: list[dict] = []
-        self._crosshair_items: list = []
+        self._crosshair_items:  list = []
         self._annotation_items: dict[str, list] = {}
         self._magnifier = None
         self._current_image_path: Path | None = None
         self._original_size: tuple[int, int] = (0, 0)
 
+        # Async load tracking — incremented on every load_image call;
+        # stale results (older seq) are silently discarded.
+        self._load_seq:    int = 0
+        self._pending_path: Path | None = None
+        self._loader_signals = _LoaderSignals()
+        self._loader_signals.finished.connect(self._on_image_loaded)
+        self._loader_signals.failed.connect(self._on_image_load_failed)
+
         # Debounce timer: coalesces rapid slider changes into a single redraw
         self._adjust_timer = QTimer(self)
         self._adjust_timer.setSingleShot(True)
-        self._adjust_timer.setInterval(80)  # ms — tune to taste
+        self._adjust_timer.setInterval(80)
         self._adjust_timer.timeout.connect(self._reload_pixmap)
 
     def load_image(self, path: Path) -> None:
-        """Load a new image WITHOUT resetting the current zoom level."""
-        self._current_image_path = path
-        suffix = path.suffix.lower()
+        """
+        Begin loading an image asynchronously.  Returns immediately — the scene
+        is updated later via _on_image_loaded once the background thread finishes.
+        """
+        self._load_seq += 1
+        self._pending_path = path
+        loader = _ImageLoader(path, dict(self._config), self._load_seq, self._loader_signals)
+        QThreadPool.globalInstance().start(loader)
 
-        if suffix in _QT_NATIVE_EXTENSIONS and _adjustments_are_default(self._config):
-            # Fast path: Qt decodes natively, no PIL overhead
-            self._pil_image = None
-            pixmap = QPixmap(str(path))
-        else:
-            # PIL path: special format (HEIC/TIFF/RW2) or active adjustments
-            self._pil_image = _load_pil_image(path)
-            pixmap = _apply_adjustments(self._pil_image, self._config)
+    @Slot(bytes, int, int, object, int)
+    def _on_image_loaded(self, raw_bytes: bytes, width: int, height: int, pil_image: object, seq: int) -> None:
+        """Main-thread slot called when the background loader finishes."""
+        if seq != self._load_seq:
+            return  # a newer load_image() call superseded this one
+
+        path = self._pending_path
+        if path is None:
+            return
+
+        self._pil_image = pil_image  # type: ignore[assignment]
+        qimage = QImage(raw_bytes, width, height, width * 3, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
 
         if pixmap.isNull():
-            raise ValueError(f"Could not load image: {path}")
+            self.load_failed.emit(f"Could not load image: {path}")
+            return
+
+        self._current_image_path = path
         self._original_size = (pixmap.width(), pixmap.height())
 
         self._scene.clear()
@@ -152,7 +207,6 @@ class AnnotationCanvas(QGraphicsView):
         self._pixmap_item.setPos(0, 0)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
 
-        # Update scale_info to reflect current transform (zoom preserved)
         self._scale_info = ScaleInfo(
             scale_factor=self.transform().m11(),
             original_width=pixmap.width(),
@@ -160,16 +214,21 @@ class AnnotationCanvas(QGraphicsView):
         )
         self._init_crosshair()
         self._rebuild_annotation_graphics()
-        # If the mouse is already inside the canvas, update crosshair and magnifier
-        # immediately — otherwise they stay hidden until the next mouse-move event.
         self._sync_cursor_overlays()
+
+        self.image_loaded.emit(path)
+
+    @Slot(str, int)
+    def _on_image_load_failed(self, error: str, seq: int) -> None:
+        if seq != self._load_seq:
+            return
+        self.load_failed.emit(error)
 
     def set_config(self, config: dict) -> None:
         old_adj = self._config.get("image_adjustments", {})
         self._config = config
         new_adj = config.get("image_adjustments", {})
         if new_adj != old_adj:
-            # Debounce: restart the timer so rapid slider moves batch into one redraw
             self._adjust_timer.start()
         self._rebuild_annotation_graphics()
         if self._magnifier:
@@ -216,8 +275,7 @@ class AnnotationCanvas(QGraphicsView):
             self.zoom_changed.emit(self.transform().m11())
         else:
             super().wheelEvent(event)
-        # Always consume the event — prevent it propagating to parent widgets
-        # (e.g. the config panel's QScrollArea) when the canvas has nothing to scroll.
+        # Always consume — prevent propagation to the config panel's QScrollArea
         event.accept()
 
     def mouseMoveEvent(self, event):
@@ -256,28 +314,13 @@ class AnnotationCanvas(QGraphicsView):
     # ------------------------------------------------------------------
 
     def _reload_pixmap(self) -> None:
-        """
-        Re-apply current adjustments to the displayed image and update the scene.
-        Called after the debounce timer fires following an adjustment change.
-
-        Two paths:
-        - Adjustments back to default + Qt-native format → fast Qt reload, drop PIL image
-        - Any other case → use/lazy-load PIL image, apply adjustments via BMP intermediate
-        """
+        """Re-apply current adjustments and update the scene. Runs on the main thread."""
         if self._current_image_path is None or self._pixmap_item is None:
             return
 
-        suffix = self._current_image_path.suffix.lower()
-
-        if _adjustments_are_default(self._config) and suffix in _QT_NATIVE_EXTENSIONS:
-            # Adjustments reset to neutral: go back to the Qt fast path
-            self._pil_image = None
-            pixmap = QPixmap(str(self._current_image_path))
-        else:
-            # Need adjusted display: lazy-load PIL image if not already cached
-            if self._pil_image is None:
-                self._pil_image = _load_pil_image(self._current_image_path)
-            pixmap = _apply_adjustments(self._pil_image, self._config)
+        if self._pil_image is None:
+            self._pil_image = _load_pil_image(self._current_image_path)
+        pixmap = _apply_adjustments(self._pil_image, self._config)
 
         if pixmap.isNull():
             return
@@ -293,9 +336,8 @@ class AnnotationCanvas(QGraphicsView):
 
     def _sync_cursor_overlays(self) -> None:
         """
-        If the mouse is currently inside the canvas viewport, immediately update
-        the crosshair and magnifier to their correct positions.  Called after
-        load_image so the overlays appear without requiring a mouse move.
+        If the mouse is already inside the viewport when an image finishes loading,
+        update crosshair and magnifier immediately without waiting for a mouse move.
         """
         viewport = self.viewport()
         local = viewport.mapFromGlobal(QCursor.pos())

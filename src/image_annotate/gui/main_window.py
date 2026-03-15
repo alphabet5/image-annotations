@@ -27,6 +27,7 @@ class MainWindow(QMainWindow):
         self._config = config
         self._annotations: list[dict] = []
         self._current_image_path: Path | None = None
+        self._pending_annotations: list[dict] = []  # set in _on_image_selected, applied after load
 
         # Load annotations and determine annotation styles
         try:
@@ -79,6 +80,9 @@ class MainWindow(QMainWindow):
 
         self._config_panel = ConfigPanel(config, self)
         self._config_panel.populate_annotation_styles(config.get("annotation_styles", {}))
+        # Sync active_annotation_name back from the panel (it picks the first entry by default)
+        config["active_annotation_name"] = self._config_panel.annotation_list.get_active_name()
+        self._config = config
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self._canvas)
@@ -102,6 +106,8 @@ class MainWindow(QMainWindow):
         self._canvas.annotation_removed.connect(self._on_annotation_removed)
         self._canvas.zoom_changed.connect(self._on_zoom_changed)
         self._canvas.cursor_moved.connect(self._on_cursor_moved)
+        self._canvas.image_loaded.connect(self._on_canvas_image_loaded)
+        self._canvas.load_failed.connect(self._on_canvas_load_failed)
 
     def _setup_shortcuts(self):
         QShortcut(QKeySequence.StandardKey.Undo, self).activated.connect(self._undo)
@@ -127,14 +133,6 @@ class MainWindow(QMainWindow):
     def _on_image_selected(self, path: Path):
         self._current_image_path = path
         log.debug("image selected: %s", path.resolve())
-        try:
-            self._canvas.load_image(path)
-        except Exception as e:
-            QMessageBox.warning(self, "Image error", f"Could not open image:\n{e}")
-            return
-
-        # Apply stored zoom (preserves zoom across image switches)
-        self._canvas.zoom_to(self._zoom_level)
 
         # Reload full annotation list from TSV
         try:
@@ -155,13 +153,28 @@ class MainWindow(QMainWindow):
                 img_anns.append(a)
         log.debug("annotations matched for this image: %d", len(img_anns))
 
-        self._canvas.set_annotations(img_anns)
-        self._canvas.set_config(self._config)
-        self._config_panel.annotation_list.populate_from_annotations(img_anns)
+        # Store for use once the async load completes
+        self._pending_annotations = img_anns
 
-        n = len(img_anns)
+        self._status.showMessage(f"Loading {path.name}…")
+        self._canvas.load_image(path)
+
+    @Slot(Path)
+    def _on_canvas_image_loaded(self, path: Path):
+        """Called on the main thread once the background image loader completes."""
+        # Apply zoom, annotations, and config now that the image is in the scene
+        self._canvas.zoom_to(self._zoom_level)
+        self._canvas.set_annotations(self._pending_annotations)
+        self._canvas.set_config(self._config)
+        self._config_panel.annotation_list.populate_from_annotations(self._pending_annotations)
+
+        n = len(self._pending_annotations)
         pct = int(self._zoom_level * 100)
         self._status.showMessage(f"{path.name}  —  {n} annotation(s)  |  zoom {pct}%")
+
+    @Slot(str)
+    def _on_canvas_load_failed(self, error: str):
+        QMessageBox.warning(self, "Image error", f"Could not open image:\n{error}")
 
     @Slot(dict)
     def _on_annotation_added(self, ann: dict):
@@ -251,22 +264,12 @@ class MainWindow(QMainWindow):
         self._status.showMessage(f"{name}  |  x={x:.1f}  y={y:.1f}  |  zoom {pct}%")
 
     def _next_image(self):
-        self._config_panel.file_tree._tree.setCurrentIndex(
-            self._config_panel.file_tree._tree.indexBelow(
-                self._config_panel.file_tree._tree.currentIndex()
-            )
-        )
-        idx = self._config_panel.file_tree._tree.currentIndex()
-        self._config_panel.file_tree._on_item_activated(idx)
+        tree = self._config_panel.file_tree._tree
+        tree.setCurrentIndex(tree.indexBelow(tree.currentIndex()))
 
     def _prev_image(self):
-        self._config_panel.file_tree._tree.setCurrentIndex(
-            self._config_panel.file_tree._tree.indexAbove(
-                self._config_panel.file_tree._tree.currentIndex()
-            )
-        )
-        idx = self._config_panel.file_tree._tree.currentIndex()
-        self._config_panel.file_tree._on_item_activated(idx)
+        tree = self._config_panel.file_tree._tree
+        tree.setCurrentIndex(tree.indexAbove(tree.currentIndex()))
 
     def _restore_settings(self):
         from PySide6.QtCore import QSettings
