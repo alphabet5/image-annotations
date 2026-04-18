@@ -1,5 +1,5 @@
-from PySide6.QtCore import QRect, QPointF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QRectF, QPointF, Qt
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 
@@ -9,8 +9,9 @@ class MagnifierOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setWindowFlags(Qt.WindowType.SubWindow)
-        self._source_pixmap = None
-        self._zoom_rect: QRect | None = None
+        self._source_image: QImage | None = None
+        self._source_pixmap_key: int = -1  # pixmap cache key, for change detection
+        self._zoom_rectf: QRectF | None = None
         self._size: int = 150
         self._zoom_factor: float = 4.0
         self._offset_x: int = 20
@@ -38,14 +39,18 @@ class MagnifierOverlay(QWidget):
             self.hide()
             return
 
-        self._source_pixmap = pixmap_item.pixmap()
+        pm = pixmap_item.pixmap()
+        if pm.cacheKey() != self._source_pixmap_key:
+            self._source_image = pm.toImage()
+            self._source_pixmap_key = pm.cacheKey()
+
         cx, cy = scene_pos.x(), scene_pos.y()
         region_half = (self._size / 2) / self._zoom_factor
-        self._zoom_rect = QRect(
-            int(cx - region_half),
-            int(cy - region_half),
-            max(1, int(region_half * 2)),
-            max(1, int(region_half * 2)),
+        self._zoom_rectf = QRectF(
+            cx - region_half,
+            cy - region_half,
+            max(1.0, region_half * 2),
+            max(1.0, region_half * 2),
         )
 
         lens_x = int(cursor_view_pos.x()) + self._offset_x
@@ -61,7 +66,7 @@ class MagnifierOverlay(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        if not self._source_pixmap or not self._zoom_rect:
+        if not self._source_image or not self._zoom_rectf:
             return
         painter = QPainter(self)
         painter.setRenderHint(
@@ -72,10 +77,12 @@ class MagnifierOverlay(QWidget):
         path.addEllipse(0, 0, self._size, self._size)
         painter.setClipPath(path)
 
-        painter.drawPixmap(
-            QRect(0, 0, self._size, self._size),
-            self._source_pixmap,
-            self._zoom_rect,
+        # drawImage with QRectF source supports sub-pixel sampling — the source
+        # region shifts continuously rather than snapping to whole pixels.
+        painter.drawImage(
+            QRectF(0, 0, self._size, self._size),
+            self._source_image,
+            self._zoom_rectf,
         )
 
         painter.setClipping(False)

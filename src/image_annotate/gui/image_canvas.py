@@ -280,13 +280,21 @@ class AnnotationCanvas(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
-        scene_pos = self.mapToScene(event.position().toPoint())
+        # mapToScene only accepts QPoint (integer), losing the sub-pixel fraction.
+        # Recover it by adding (fractional viewport offset / zoom) back in scene units.
+        vpos = event.position()
+        int_scene = self.mapToScene(vpos.toPoint())
+        zoom = self.transform().m11()
+        frac_x = vpos.x() - int(vpos.x())
+        frac_y = vpos.y() - int(vpos.y())
+        scene_pos = QPointF(int_scene.x() + frac_x / zoom, int_scene.y() + frac_y / zoom)
+
         self._update_crosshair(scene_pos)
         if self._original_size[0] > 0:
             self.cursor_moved.emit(scene_pos.x(), scene_pos.y())
         if self._config.get("magnifier", {}).get("enabled") and self._magnifier:
             self._magnifier.update_from_cursor(
-                cursor_view_pos=event.position(),
+                cursor_view_pos=vpos,
                 scene_pos=scene_pos,
                 pixmap_item=self._pixmap_item,
                 scale_info=self._scale_info,
