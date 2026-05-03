@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -51,6 +52,7 @@ class ConfigPanel(QWidget):
         self.file_tree.setMinimumHeight(200)
         layout.addWidget(self.file_tree)
 
+        layout.addWidget(self._build_notes_group())
         layout.addWidget(self._build_annotation_names_group(config))
         layout.addWidget(self._build_magnifier_group(config))
         layout.addWidget(self._build_adjustments_group(config))
@@ -69,6 +71,15 @@ class ConfigPanel(QWidget):
     # ------------------------------------------------------------------
     # Group builders
     # ------------------------------------------------------------------
+
+    def _build_notes_group(self) -> QGroupBox:
+        group = QGroupBox("Notes")
+        layout = QVBoxLayout(group)
+        self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setPlaceholderText("Notes for this image…")
+        self.notes_edit.setMaximumHeight(80)
+        layout.addWidget(self.notes_edit)
+        return group
 
     def _build_annotation_names_group(self, config: dict) -> QGroupBox:
         group = QGroupBox("Annotations")

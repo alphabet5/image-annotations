@@ -107,17 +107,33 @@ def load_annotations(tsv_path: Path) -> tuple[list[dict], dict]:
         reader = csv.DictReader(io.StringIO("".join(data_lines)), delimiter="\t")
         for row in reader:
             try:
-                rows.append({
-                    "id": row.get("id") or str(uuid.uuid4()),
-                    "image_file": row["image-file"],
-                    "annotation_name": row["annotation-name"],
-                    "annotation_color": _parse_legacy_color(row),
-                    "location_x": float(row["locationX(px)"]),
-                    "location_y": float(row["locationY(px)"]),
-                    "image_width": int(row["imageX(total width px)"]),
-                    "image_height": int(row["imageY(total height px)"]),
-                    **{f: row.get(f, "") for f in metadata_fields},
-                })
+                loc_x_raw = row.get("locationX(px)", "").strip()
+                loc_y_raw = row.get("locationY(px)", "").strip()
+                if loc_x_raw == "" and loc_y_raw == "":
+                    # Note row: blank location columns
+                    rows.append({
+                        "id": row.get("id") or str(uuid.uuid4()),
+                        "image_file": row["image-file"],
+                        "annotation_name": row["annotation-name"],
+                        "is_note": True,
+                        "annotation_color": "",
+                        "location_x": 0.0,
+                        "location_y": 0.0,
+                        "image_width": 0,
+                        "image_height": 0,
+                    })
+                else:
+                    rows.append({
+                        "id": row.get("id") or str(uuid.uuid4()),
+                        "image_file": row["image-file"],
+                        "annotation_name": row["annotation-name"],
+                        "annotation_color": _parse_legacy_color(row),
+                        "location_x": float(loc_x_raw),
+                        "location_y": float(loc_y_raw),
+                        "image_width": int(row["imageX(total width px)"]),
+                        "image_height": int(row["imageY(total height px)"]),
+                        **{f: row.get(f, "") for f in metadata_fields},
+                    })
             except (KeyError, ValueError, TypeError) as exc:
                 log.debug("load_annotations: skipping malformed row %r: %s", row, exc)
                 continue
@@ -187,6 +203,15 @@ def save_annotations(
 
 
 def _annotation_to_row(ann: dict, metadata_fields: list[str] | None = None) -> dict:
+    if ann.get("is_note"):
+        return {
+            "image-file": ann["image_file"],
+            "annotation-name": ann["annotation_name"],
+            "locationX(px)": "",
+            "locationY(px)": "",
+            "imageX(total width px)": "",
+            "imageY(total height px)": "",
+        }
     row: dict = {
         "image-file": ann["image_file"],
         "annotation-name": ann["annotation_name"],

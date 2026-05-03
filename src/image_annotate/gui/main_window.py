@@ -131,6 +131,9 @@ class MainWindow(QMainWindow):
 
     @Slot(Path)
     def _on_image_selected(self, path: Path):
+        # Save any existing note for the previously-selected image before switching
+        self._save_current_note()
+
         self._current_image_path = path
         log.debug("image selected: %s", path.resolve())
 
@@ -156,19 +159,65 @@ class MainWindow(QMainWindow):
         # Store for use once the async load completes
         self._pending_annotations = img_anns
 
+        # Load the note for this image into the notes panel
+        note_ann = next((a for a in img_anns if a.get("is_note")), None)
+        self._config_panel.notes_edit.setPlainText(note_ann["annotation_name"] if note_ann else "")
+
         self._status.showMessage(f"Loading {path.name}…")
         self._canvas.load_image(path)
+
+    def _save_current_note(self) -> None:
+        """Persist the notes box content for the currently-selected image."""
+        if not self._current_image_path:
+            return
+        images_dir = Path(self._config.get("images_dir", "."))
+        try:
+            rel = str(self._current_image_path.relative_to(images_dir))
+        except ValueError:
+            rel = str(self._current_image_path)
+
+        note_text = self._config_panel.notes_edit.toPlainText().strip()
+
+        # Remove any existing note row for this image
+        self._annotations = [
+            a for a in self._annotations
+            if not (a.get("is_note") and a["image_file"] == rel)
+        ]
+
+        if note_text:
+            import uuid as _uuid
+            self._annotations.append({
+                "id": str(_uuid.uuid4()),
+                "image_file": rel,
+                "annotation_name": note_text,
+                "is_note": True,
+                "annotation_color": "",
+                "location_x": 0.0,
+                "location_y": 0.0,
+                "image_width": 0,
+                "image_height": 0,
+            })
+
+        try:
+            save_annotations(
+                self._annotations,
+                Path(self._config["annotations_file"]),
+                session_config=self._config,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Save error", f"Could not write note:\n{e}")
 
     @Slot(Path)
     def _on_canvas_image_loaded(self, path: Path):
         """Called on the main thread once the background image loader completes."""
-        # Apply zoom, annotations, and config now that the image is in the scene
+        # Apply zoom, annotations (excluding note rows), and config
+        display_anns = [a for a in self._pending_annotations if not a.get("is_note")]
         self._canvas.zoom_to(self._zoom_level)
-        self._canvas.set_annotations(self._pending_annotations)
+        self._canvas.set_annotations(display_anns)
         self._canvas.set_config(self._config)
-        self._config_panel.annotation_list.populate_from_annotations(self._pending_annotations)
+        self._config_panel.annotation_list.populate_from_annotations(display_anns)
 
-        n = len(self._pending_annotations)
+        n = len(display_anns)
         pct = int(self._zoom_level * 100)
         self._status.showMessage(f"{path.name}  —  {n} annotation(s)  |  zoom {pct}%")
 
@@ -282,6 +331,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QSettings
         s = QSettings("image-annotate", "image-annotate")
         s.setValue("geometry", self.saveGeometry())
+
+        self._save_current_note()
 
         # Persist session config (styles, zoom, display settings) to TSV on close,
         # even if no annotation was added/removed in this session.
