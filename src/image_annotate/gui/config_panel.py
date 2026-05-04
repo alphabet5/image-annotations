@@ -48,7 +48,9 @@ class ConfigPanel(QWidget):
         layout.setSpacing(8)
 
         images_dir = Path(config.get("images_dir", "."))
-        self.file_tree = FileTreeWidget(images_dir, self)
+        image_files_raw = config.get("image_files")
+        image_files = [Path(p) for p in image_files_raw] if image_files_raw else None
+        self.file_tree = FileTreeWidget(images_dir, files=image_files, parent=self)
         self.file_tree.setMinimumHeight(200)
         layout.addWidget(self.file_tree)
 

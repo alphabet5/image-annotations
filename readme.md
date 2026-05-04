@@ -15,7 +15,11 @@ uv tool install --reinstall .
 ## How to use
 
 ```bash
-image-annotate ui --images ./img --annotations ./example-annotations.tsv
+# Point at a directory
+image-annotate ui ./img --annotations ./example-annotations.tsv
+
+# Or pass files directly (shell glob expansion works)
+image-annotate ui --annotations ./example-annotations.tsv ./*/frame_*12{0,1,2}.tiff
 ```
 
 ![usage](img/usage.png)

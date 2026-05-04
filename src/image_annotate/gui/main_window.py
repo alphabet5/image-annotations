@@ -129,6 +129,14 @@ class MainWindow(QMainWindow):
         self._zoom_level = config.get("zoom", self._zoom_level)
         self._canvas.set_config(config)
 
+    def _display_name(self, path: Path) -> str:
+        """Return path relative to images_dir, or just the name if outside images_dir."""
+        images_dir = Path(self._config.get("images_dir", "."))
+        try:
+            return str(path.relative_to(images_dir))
+        except ValueError:
+            return path.name
+
     @Slot(Path)
     def _on_image_selected(self, path: Path):
         # Save any existing note for the previously-selected image before switching
@@ -163,7 +171,7 @@ class MainWindow(QMainWindow):
         note_ann = next((a for a in img_anns if a.get("is_note")), None)
         self._config_panel.notes_edit.setPlainText(note_ann["annotation_name"] if note_ann else "")
 
-        self._status.showMessage(f"Loading {path.name}…")
+        self._status.showMessage(f"Loading {self._display_name(path)}…")
         self._canvas.load_image(path)
 
     def _save_current_note(self) -> None:
@@ -219,7 +227,7 @@ class MainWindow(QMainWindow):
 
         n = len(display_anns)
         pct = int(self._zoom_level * 100)
-        self._status.showMessage(f"{path.name}  —  {n} annotation(s)  |  zoom {pct}%")
+        self._status.showMessage(f"{self._display_name(path)}  —  {n} annotation(s)  |  zoom {pct}%")
 
     @Slot(str)
     def _on_canvas_load_failed(self, error: str):
@@ -303,13 +311,13 @@ class MainWindow(QMainWindow):
         self._zoom_level = factor
         self._config["zoom"] = factor
         pct = int(factor * 100)
-        name = self._current_image_path.name if self._current_image_path else ""
+        name = self._display_name(self._current_image_path) if self._current_image_path else ""
         self._status.showMessage(f"{name}  |  zoom {pct}%")
 
     @Slot(float, float)
     def _on_cursor_moved(self, x: float, y: float):
         pct = int(self._canvas.current_zoom() * 100)
-        name = self._current_image_path.name if self._current_image_path else ""
+        name = self._display_name(self._current_image_path) if self._current_image_path else ""
         self._status.showMessage(f"{name}  |  x={x:.1f}  y={y:.1f}  |  zoom {pct}%")
 
     def _next_image(self):

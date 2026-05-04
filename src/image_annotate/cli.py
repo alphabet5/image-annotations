@@ -1,7 +1,27 @@
 import logging
+import os
 from pathlib import Path
 
 import click
+
+
+def _resolve_images(images: tuple[str, ...]) -> tuple[Path, list[Path] | None]:
+    """Return (images_dir, image_files).
+
+    If no paths given, use cwd as directory.
+    If a single directory is given, use it as images_dir with no file list.
+    If one or more files are given, derive images_dir from their common parent.
+    """
+    if not images:
+        return Path("."), None
+    paths = [Path(p) for p in images]
+    if len(paths) == 1 and paths[0].is_dir():
+        return paths[0], None
+    # One or more explicit files (possibly from shell glob expansion)
+    resolved = [p.resolve() for p in paths]
+    common = Path(os.path.commonpath([str(p) for p in resolved]))
+    images_dir = common if common.is_dir() else common.parent
+    return images_dir, paths
 
 
 def _common_options(f):
@@ -12,14 +32,6 @@ def _common_options(f):
         type=click.Path(),
         show_default=True,
         help="TSV file for annotations.",
-    )(f)
-    f = click.option(
-        "--images",
-        "images_dir",
-        default=".",
-        type=click.Path(exists=True, file_okay=False),
-        show_default=True,
-        help="Folder to load in file tree (defaults to cwd).",
     )(f)
     f = click.option(
         "-v", "--verbose",
@@ -49,18 +61,35 @@ def cli(ctx):
 
 @cli.command("ui")
 @_common_options
-def launch_ui(annotations_path, images_dir, verbose):
-    """Launch the graphical annotation interface."""
+@click.argument("images", nargs=-1, type=click.Path(exists=True))
+def launch_ui(annotations_path, images, verbose):
+    """Launch the graphical annotation interface.
+
+    IMAGES can be a directory (default: cwd) or one or more image files,
+    e.g. from shell glob expansion:
+
+        image-annotate ui --annotations out.tsv ./*/frame_*120.tiff
+    """
     _setup_logging(verbose)
     from .app import launch_gui
+    images_dir, image_files = _resolve_images(images)
     launch_gui(
-        images_dir=Path(images_dir),
+        images_dir=images_dir,
         annotations_file=Path(annotations_path),
+        image_files=image_files,
     )
 
 
 @cli.command("generate-images")
 @_common_options
+@click.option(
+    "--images",
+    "images_dir",
+    default=".",
+    type=click.Path(exists=True, file_okay=False),
+    show_default=True,
+    help="Folder containing source images (defaults to cwd).",
+)
 @click.option(
     "--format",
     "filename_template",
